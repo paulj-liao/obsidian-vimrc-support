@@ -1,5 +1,5 @@
 import * as keyFromAccelerator from 'keyboardevent-from-electron-accelerator';
-import { App, EditorSelection, MarkdownView, Notice, Editor as ObsidianEditor, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, EditorSelection, MarkdownView, Modal, Notice, Editor as ObsidianEditor, Plugin, PluginSettingTab, Setting } from 'obsidian';
 
 import { followLinkUnderCursor } from './actions/followLinkUnderCursor';
 import { moveDownSkippingFolds, moveUpSkippingFolds } from './actions/moveSkippingFolds';
@@ -276,6 +276,33 @@ export default class VimrcPlugin extends Plugin {
 		return (view as any).editMode?.editor?.cm?.cm;
 	}
 
+	private isPathSafe(filePath: string): boolean {
+		// Prevent path traversal attacks
+		// Check for attempts to escape vault with ../ or absolute paths
+		if (!filePath || filePath.trim().length === 0) {
+			return false;
+		}
+
+		const normalizedPath = filePath.trim();
+
+		// Reject absolute paths (starting with / or drive letters like C:)
+		if (normalizedPath.startsWith('/') || normalizedPath.match(/^[a-zA-Z]:/)) {
+			return false;
+		}
+
+		// Reject paths containing ../ or ..\\ which could escape the vault
+		if (normalizedPath.includes('../') || normalizedPath.includes('..\\')) {
+			return false;
+		}
+
+		// Reject paths starting with ..
+		if (normalizedPath.startsWith('..')) {
+			return false;
+		}
+
+		return true;
+	}
+
 	readVimInit(vimCommands: string) {
 		let view = this.getActiveView();
 		if (view) {
@@ -316,7 +343,8 @@ export default class VimrcPlugin extends Plugin {
 				function (line: string, index: number, arr: [string]) {
 					if (line.trim().length > 0 && line.trim()[0] != '"') {
 						let split = line.split(" ")
-						if (mappingCommands.includes(split[0])) {
+						// Security: Add null safety check for split array
+						if (mappingCommands.includes(split[0]) && split.length > 1) {
 							// Have to do this because "vim-command-done" event doesn't actually work properly, or something.
 							this.customVimKeybinds[split[1]] = true
 						}
@@ -412,7 +440,17 @@ export default class VimrcPlugin extends Plugin {
 			let events: KeyboardEvent[] = [];
 			for (const key of params.args) {
 				if (key.startsWith('wait')) {
-					const delay = key.slice(4);
+					const delayStr = key.slice(4);
+					const delay = parseInt(delayStr);
+
+					// Security: Prevent DoS by limiting max delay to 60 seconds
+					if (isNaN(delay) || delay < 0) {
+						throw new Error(`Invalid delay value: ${delayStr}`);
+					}
+					if (delay > 60) {
+						throw new Error(`Delay too long: ${delay}s. Maximum allowed is 60 seconds.`);
+					}
+
 					await sleep(delay * 1000);
 				}
 				else {
@@ -427,7 +465,8 @@ export default class VimrcPlugin extends Plugin {
 					}
 					if (allGood) {
 						for (keyEvent of events)
-							window.postMessage(JSON.parse(JSON.stringify(keyEvent)), '*');
+							// Security: Use window.location.origin instead of wildcard '*'
+							window.postMessage(JSON.parse(JSON.stringify(keyEvent)), window.location.origin);
 						// view.containerEl.dispatchEvent(keyEvent);
 					}
 				}
@@ -519,9 +558,17 @@ export default class VimrcPlugin extends Plugin {
 
 		vimObject.defineEx("pasteinto", "", (cm: any, params: any) => {
 			// Using the register for when this.yankToSystemClipboard == false
+			const yankRegister = vimObject.getRegisterController().getRegister('yank');
+			const keyBuffer = yankRegister?.keyBuffer;
+
+			// Security: Add null safety check for keyBuffer
+			if (!keyBuffer || keyBuffer.length === 0 || !keyBuffer[0]) {
+				throw new Error("Yank buffer is empty. Copy some text first.");
+			}
+
 			surroundFunc(
 				['[',
-				 '](' + vimObject.getRegisterController().getRegister('yank').keyBuffer[0].trim() + ")"]);
+				 '](' + keyBuffer[0].trim() + ")"]);
 		})
 
 		var editor = this.getActiveView().editor;
@@ -554,11 +601,16 @@ export default class VimrcPlugin extends Plugin {
 		}
 
 		const yankRegister = this.codeMirrorVimObject.getRegisterController().getRegister('yank');
-		const currentYankBuffer = yankRegister.keyBuffer;
+		const currentYankBuffer = yankRegister?.keyBuffer;
+
+		// Security: Add null safety check for yank buffer
+		if (!currentYankBuffer || currentYankBuffer.length === 0) {
+			return;
+		}
 
 		// yank -> clipboard
 		const buf = currentYankBuffer[0]
-		if (buf !== this.lastYankBuffer[0]) {
+		if (buf && buf !== this.lastYankBuffer[0]) {
 			await win.navigator.clipboard.writeText(buf);
 			this.lastYankBuffer = currentYankBuffer;
 			this.lastSystemClipboard = await win.navigator.clipboard.readText();
@@ -678,6 +730,12 @@ export default class VimrcPlugin extends Plugin {
 				throw new Error("Expected format: fileName {extraCode}");
 			let extraCode = '';
 			const fileName = params.args[0];
+
+			// Security: Validate file path to prevent path traversal
+			if (!this.isPathSafe(fileName)) {
+				throw new Error(`Security: Invalid file path "${fileName}". Paths must be within the vault and cannot contain .. or absolute paths.`);
+			}
+
 			if (params.args.length > 1) {
 				params.args.shift();
 				extraCode = params.args.join(' ').trim() as string;
@@ -703,6 +761,12 @@ export default class VimrcPlugin extends Plugin {
 			if (params?.args?.length > 1)
 				throw new Error("Expected format: source [fileName]");
 			const fileName = params.argString.trim();
+
+			// Security: Validate file path to prevent path traversal
+			if (!this.isPathSafe(fileName)) {
+				throw new Error(`Security: Invalid file path "${fileName}". Paths must be within the vault and cannot contain .. or absolute paths.`);
+			}
+
 			try {
 				this.app.vault.adapter.read(fileName).then(vimrcContent => {
 					this.loadVimCommands(vimrcContent);
@@ -721,6 +785,76 @@ class SettingsTab extends PluginSettingTab {
 	constructor(app: App, plugin: VimrcPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
+	}
+
+	async showJsCommandSecurityWarning(): Promise<boolean> {
+		return new Promise((resolve) => {
+			const modal = new Modal(this.app);
+			modal.titleEl.setText('⚠️ SECURITY WARNING');
+
+			const content = modal.contentEl;
+			content.empty();
+
+			content.createEl('p', { text: '⚠️ DANGER: Enabling JavaScript commands poses severe security risks!' });
+			content.createEl('p', { text: 'This feature allows arbitrary code execution in your Obsidian app.' });
+
+			const warningList = content.createEl('ul');
+			warningList.createEl('li', { text: 'Malicious .vimrc files can steal your vault data' });
+			warningList.createEl('li', { text: 'Malicious code can access your files and clipboard' });
+			warningList.createEl('li', { text: 'Malicious code can send data to external servers' });
+			warningList.createEl('li', { text: 'Shared vaults from untrusted sources are dangerous' });
+
+			content.createEl('p', {
+				text: 'Only enable this if you:',
+				attr: { style: 'font-weight: bold; margin-top: 1em;' }
+			});
+
+			const safetyList = content.createEl('ul');
+			safetyList.createEl('li', { text: 'Fully understand the security implications' });
+			safetyList.createEl('li', { text: 'Only use .vimrc files you created yourself' });
+			safetyList.createEl('li', { text: 'Never sync .vimrc files from untrusted sources' });
+			safetyList.createEl('li', { text: 'Review ALL .vimrc content before loading' });
+
+			content.createEl('p', {
+				text: 'Type "I UNDERSTAND THE RISKS" to enable:',
+				attr: { style: 'font-weight: bold; margin-top: 1em;' }
+			});
+
+			const input = content.createEl('input', {
+				type: 'text',
+				placeholder: 'Type confirmation text...',
+				attr: { style: 'width: 100%; padding: 0.5em; margin: 0.5em 0;' }
+			});
+
+			const buttonContainer = content.createEl('div', {
+				attr: { style: 'display: flex; gap: 0.5em; margin-top: 1em; justify-content: flex-end;' }
+			});
+
+			const cancelButton = buttonContainer.createEl('button', { text: 'Cancel' });
+			cancelButton.addEventListener('click', () => {
+				modal.close();
+				resolve(false);
+			});
+
+			const confirmButton = buttonContainer.createEl('button', {
+				text: 'Enable (Dangerous!)',
+				attr: { style: 'background-color: var(--interactive-accent); color: var(--text-on-accent);' }
+			});
+			confirmButton.disabled = true;
+
+			input.addEventListener('input', () => {
+				confirmButton.disabled = input.value !== 'I UNDERSTAND THE RISKS';
+			});
+
+			confirmButton.addEventListener('click', () => {
+				if (input.value === 'I UNDERSTAND THE RISKS') {
+					modal.close();
+					resolve(true);
+				}
+			});
+
+			modal.open();
+		});
 	}
 
 	display(): void {
@@ -789,9 +923,21 @@ class SettingsTab extends PluginSettingTab {
 			.setDesc("Support the 'jscommand' and 'jsfile' commands, which allow defining Ex commands using Javascript. WARNING! Review the README to understand why this may be dangerous before enabling.")
 			.addToggle(toggle => {
 				toggle.setValue(this.plugin.settings.supportJsCommands ?? DEFAULT_SETTINGS.supportJsCommands);
-				toggle.onChange(value => {
-					this.plugin.settings.supportJsCommands = value;
-					this.plugin.saveSettings();
+				toggle.onChange(async value => {
+					if (value) {
+						// Show security warning dialog when enabling
+						const confirmed = await this.showJsCommandSecurityWarning();
+						if (confirmed) {
+							this.plugin.settings.supportJsCommands = true;
+							this.plugin.saveSettings();
+						} else {
+							// Revert toggle if user cancels
+							toggle.setValue(false);
+						}
+					} else {
+						this.plugin.settings.supportJsCommands = false;
+						this.plugin.saveSettings();
+					}
 				})
 			});
 

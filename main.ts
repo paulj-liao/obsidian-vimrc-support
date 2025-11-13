@@ -79,7 +79,8 @@ export default class VimrcPlugin extends Plugin {
 	private customVimKeybinds: { [name: string]: boolean } = {};
 	private currentSelection: [EditorSelection] = null;
 	private isInsertMode: boolean = false;
-	private vimEventsRegistered: Map<any, boolean> = new Map();
+	private cursorActivityRegistered: Map<any, boolean> = new Map();
+	private vimModeHandlersRegistered: Map<any, boolean> = new Map();
 
 	updateVimStatusBar() {
 		this.vimStatusBar.setText(
@@ -162,15 +163,15 @@ export default class VimrcPlugin extends Plugin {
 		let cm = this.getCodeMirror(view);
 		if (!cm) return;
 
-		// Prevent duplicate cursorActivity handler registration using the same tracking map
-		if (this.vimEventsRegistered.get(cm)) {
+		// Prevent duplicate cursorActivity handler registration
+		if (this.cursorActivityRegistered.get(cm)) {
 			return;
 		}
 
 		cm.on("cursorActivity", async (cm: CodeMirror.Editor) => this.updateSelection(cm));
 
-		// Mark this editor as having events registered (must set flag after registering!)
-		this.vimEventsRegistered.set(cm, true);
+		// Mark this editor as having cursorActivity registered
+		this.cursorActivityRegistered.set(cm, true);
 	}
 
 	async updateSelection(cm: any) {
@@ -185,8 +186,8 @@ export default class VimrcPlugin extends Plugin {
 			const cmEditor = this.getCodeMirror(view);
 			if (!cmEditor) return;
 
-			// Prevent duplicate event registration - check if already registered for this editor
-			if (this.vimEventsRegistered.get(cmEditor)) {
+			// Prevent duplicate vim mode handler registration
+			if (this.vimModeHandlersRegistered.get(cmEditor)) {
 				return;
 			}
 
@@ -207,8 +208,8 @@ export default class VimrcPlugin extends Plugin {
 			CodeMirror.off(cmEditor.getInputField(), 'keydown', this.onKeydown);
 			CodeMirror.on(cmEditor.getInputField(), 'keydown', this.onKeydown);
 
-			// Mark this editor as having events registered
-			this.vimEventsRegistered.set(cmEditor, true);
+			// Mark this editor as having vim mode handlers registered
+			this.vimModeHandlersRegistered.set(cmEditor, true);
 		}
 	}
 
@@ -273,7 +274,8 @@ export default class VimrcPlugin extends Plugin {
 	onunload() {
 		console.log('unloading Vimrc plugin (but Vim commands that were already loaded will still work)');
 		// Clear event registration tracking
-		this.vimEventsRegistered.clear();
+		this.cursorActivityRegistered.clear();
+		this.vimModeHandlersRegistered.clear();
 	}
 
 	private getActiveView(): MarkdownView {
@@ -337,13 +339,13 @@ export default class VimrcPlugin extends Plugin {
 				this.codeMirrorVimObject.loadedVimrc = true;
 			}
 
-			if (cmEditor && !this.vimEventsRegistered.get(cmEditor)) {
+			if (cmEditor && !this.vimModeHandlersRegistered.get(cmEditor)) {
 				(cmEditor as any).off('vim-mode-change', this.logVimModeChange);
 				(cmEditor as any).on('vim-mode-change', this.logVimModeChange);
 				CodeMirror.off(cmEditor.getInputField(), 'keydown', this.onKeydown);
 				CodeMirror.on(cmEditor.getInputField(), 'keydown', this.onKeydown);
-				// Mark this editor as having events registered
-				this.vimEventsRegistered.set(cmEditor, true);
+				// Mark this editor as having vim mode handlers registered
+				this.vimModeHandlersRegistered.set(cmEditor, true);
 			}
 		}
 	}
@@ -660,8 +662,8 @@ export default class VimrcPlugin extends Plugin {
 			let cmEditor = this.getCodeMirror(view);
 			if (!cmEditor) return;
 
-			// Prevent duplicate event registration
-			if (this.vimEventsRegistered.get(cmEditor)) {
+			// Prevent duplicate vim keypress handler registration
+			if (this.vimModeHandlersRegistered.get(cmEditor)) {
 				return;
 			}
 
@@ -670,6 +672,9 @@ export default class VimrcPlugin extends Plugin {
 			(cmEditor as any).on('vim-keypress', this.onVimKeypress);
 			(cmEditor as any).off('vim-command-done', this.onVimCommandDone);
 			(cmEditor as any).on('vim-command-done', this.onVimCommandDone);
+
+			// Mark this editor as having vim mode handlers registered
+			this.vimModeHandlersRegistered.set(cmEditor, true);
 		}
 	}
 

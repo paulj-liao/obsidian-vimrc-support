@@ -168,6 +168,9 @@ export default class VimrcPlugin extends Plugin {
 		}
 
 		cm.on("cursorActivity", async (cm: CodeMirror.Editor) => this.updateSelection(cm));
+
+		// Mark this editor as having events registered (must set flag after registering!)
+		this.vimEventsRegistered.set(cm, true);
 	}
 
 	async updateSelection(cm: any) {

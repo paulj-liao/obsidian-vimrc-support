@@ -161,19 +161,17 @@ export default class VimrcPlugin extends Plugin {
 
 		let cm = this.getCodeMirror(view);
 		if (!cm) return;
-		if (
-			this.getCursorActivityHandlers(cm).some(
-				(e: { name: string }) => e.name === "updateSelection")
-		) return;
+
+		// Prevent duplicate cursorActivity handler registration using the same tracking map
+		if (this.vimEventsRegistered.get(cm)) {
+			return;
+		}
+
 		cm.on("cursorActivity", async (cm: CodeMirror.Editor) => this.updateSelection(cm));
 	}
 
 	async updateSelection(cm: any) {
 		this.currentSelection = cm.listSelections();
-	}
-
-	private getCursorActivityHandlers(cm: CodeMirror.Editor) {
-		return (cm as any)._handlers.cursorActivity;
 	}
 
 	async updateVimEvents() {

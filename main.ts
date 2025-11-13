@@ -82,6 +82,11 @@ export default class VimrcPlugin extends Plugin {
 	private cursorActivityRegistered: WeakSet<MarkdownView> = new WeakSet();
 	private vimModeHandlersRegistered: WeakSet<MarkdownView> = new WeakSet();
 
+	// Bound handler for cursorActivity to allow proper off/on
+	private onCursorActivity = async (cm: CodeMirror.Editor) => {
+		this.currentSelection = cm.listSelections();
+	}
+
 	updateVimStatusBar() {
 		this.vimStatusBar.setText(
 			this.settings.vimStatusPromptMap[this.currentVimStatus]
@@ -168,14 +173,12 @@ export default class VimrcPlugin extends Plugin {
 		let cm = this.getCodeMirror(view);
 		if (!cm) return;
 
-		cm.on("cursorActivity", async (cm: CodeMirror.Editor) => this.updateSelection(cm));
+		// Always call off() first to ensure no duplicate handlers
+		cm.off("cursorActivity", this.onCursorActivity);
+		cm.on("cursorActivity", this.onCursorActivity);
 
 		// Mark this view as having cursorActivity registered
 		this.cursorActivityRegistered.add(view);
-	}
-
-	async updateSelection(cm: any) {
-		this.currentSelection = cm.listSelections();
 	}
 
 	async updateVimEvents() {
